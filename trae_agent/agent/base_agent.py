@@ -11,7 +11,7 @@ from typing import Union
 from trae_agent.agent.agent_basics import AgentExecution, AgentState, AgentStep, AgentStepState
 from trae_agent.agent.docker_manager import DockerManager
 from trae_agent.tools import tools_registry
-from trae_agent.tools.base import Tool, ToolCall, ToolExecutor, ToolResult
+from trae_agent.tools.base import Tool, ToolExecutor, ToolResult
 from trae_agent.tools.ckg.ckg_database import clear_older_ckg
 from trae_agent.tools.docker_tool_executor import DockerToolExecutor
 from trae_agent.utils.cli import CLIConsole
@@ -73,6 +73,7 @@ class BaseAgent(ABC):
             self._tool_caller = original_tool_executor
 
         self._cli_console: CLIConsole | None = None
+        self.allow_mcp_servers: list[str] | None = None
 
         # Trajectory recorder
         self._trajectory_recorder: TrajectoryRecorder | None = None
@@ -157,6 +158,7 @@ class BaseAgent(ABC):
 
         try:
             messages = self._initial_messages
+            full_messages = list(messages)
             step_number = 1
             execution.agent_state = AgentState.RUNNING
 
@@ -164,6 +166,15 @@ class BaseAgent(ABC):
                 step = AgentStep(step_number=step_number, state=AgentStepState.THINKING)
                 try:
                     messages = await self._run_llm_step(step, messages, execution)
+                    full_messages.extend(messages)
+
+                    # Context compression — periodically summarize old history
+                    compressed = self._compress_messages(full_messages, step_number)
+                    if compressed is not full_messages:
+                        self._reset_llm_client_history()
+                        full_messages = compressed
+                        messages = compressed
+
                     await self._finalize_step(
                         step, messages, execution
                     )  # record trajectory for this step and update the CLI console
@@ -206,6 +217,73 @@ class BaseAgent(ABC):
             res = await self._tool_caller.close_tools()
             return res
 
+# ── Context compression ──────────────────────────────────────────────
+
+    def _compress_messages(
+        self, messages: list[LLMMessage], step_number: int
+    ) -> list[LLMMessage]:
+        """Compress old conversation history to prevent unbounded context growth.
+
+        Triggered when ``step_number % 10 == 0`` and ``len(messages) > 30``.
+        Replaces older assistant/tool-result pairs with a structured summary,
+        preserving the system prompt and the last 15 messages as the working set.
+
+        Returns the (possibly compressed) message list.
+        """
+        if not (step_number % 10 == 0 and len(messages) > 30):
+            return messages
+
+        # Always preserve: system prompt (index 0) + last 15 messages
+        keep_head = 1
+        keep_tail = 15
+        if len(messages) <= keep_head + keep_tail:
+            return messages
+
+        compressible = messages[keep_head:-keep_tail]
+
+        # Build deterministic summary from compressible history
+        summary_parts: list[str] = []
+        for msg in compressible:
+            if msg.tool_result:
+                result = msg.tool_result
+                label = "✓" if result.success else "✗"
+                detail = ""
+                if result.result:
+                    detail = result.result[:120]
+                elif result.error:
+                    detail = result.error[:120]
+                if detail:
+                    summary_parts.append(f"{label} {result.name}: {detail}")
+            elif msg.content and len(msg.content) > 20:
+                # Capture key decisions or plans from assistant messages
+                lower = msg.content.lower()
+                if any(kw in lower for kw in ("plan", "approach", "strategy", "fix", "change", "implement")):
+                    summary_parts.append(f"→ {msg.content[:200]}")
+
+        summary_text = "\n".join(summary_parts) if summary_parts else "(see last messages for context)"
+
+        compressed: list[LLMMessage] = [
+            messages[0],  # system prompt
+            LLMMessage(
+                role="user",
+                content=(
+                    f"[Context Summary — steps before #{step_number - keep_tail + 1}]:\n"
+                    f"{summary_text}\n\n"
+                    "The above is a compressed summary of earlier steps. "
+                    "Continue working on the task."
+                ),
+            ),
+            *messages[-keep_tail:],
+        ]
+        return compressed
+
+    def _reset_llm_client_history(self) -> None:
+        """Reset the LLM client's internal message history after compression."""
+        with contextlib.suppress(AttributeError):
+            self._llm_client.client.message_history = []  # type: ignore[attr-defined]
+
+    # ── Step execution ────────────────────────────────────────────────
+
     async def _run_llm_step(
         self, step: "AgentStep", messages: list["LLMMessage"], execution: "AgentExecution"
     ) -> list["LLMMessage"]:
@@ -232,8 +310,7 @@ class BaseAgent(ABC):
                 execution.agent_state = AgentState.RUNNING
                 return [LLMMessage(role="user", content=self.task_incomplete_message())]
         else:
-            tool_calls = llm_response.tool_calls
-            return await self._tool_call_handler(tool_calls, step)
+            return await self._tool_call_handler(llm_response, step)
 
     async def _finalize_step(
         self, step: "AgentStep", messages: list["LLMMessage"], execution: "AgentExecution"
@@ -277,6 +354,10 @@ class BaseAgent(ABC):
         """Return a message indicating that the task is incomplete. Override for custom logic."""
         return "The task is incomplete. Please try again."
 
+    async def initialise_mcp(self) -> None:
+        """Initialize MCP tools. Override in subclasses that use MCP."""
+        pass
+
     @abstractmethod
     async def cleanup_mcp_clients(self) -> None:
         """Clean up MCP clients. Override in subclasses that use MCP."""
@@ -312,16 +393,37 @@ class BaseAgent(ABC):
             )
 
     async def _tool_call_handler(
-        self, tool_calls: list[ToolCall] | None, step: AgentStep
+        self, llm_response: LLMResponse, step: AgentStep
     ) -> list[LLMMessage]:
+        tool_calls = llm_response.tool_calls
         messages: list[LLMMessage] = []
-        if not tool_calls or len(tool_calls) <= 0:
-            messages = [
-                LLMMessage(
-                    role="user",
-                    content="It seems that you have not completed the task.",
+
+        # Handle None tool_calls — LLM didn't request any tools, just thinking
+        if tool_calls is None:
+            if llm_response.content and len(llm_response.content) > 20:
+                # Substantive thinking — let it continue
+                messages.append(LLMMessage(role="assistant", content=llm_response.content))
+            else:
+                # Empty or very short response — nudge gently
+                messages.append(
+                    LLMMessage(
+                        role="user",
+                        content="Please continue working on the task. If you need to use a tool, you can do so now.",
+                    )
                 )
-            ]
+            return messages
+
+        # Handle empty tool_calls — LLM explicitly chose no tools
+        if len(tool_calls) <= 0:
+            if llm_response.content:
+                messages.append(LLMMessage(role="assistant", content=llm_response.content))
+            else:
+                messages.append(
+                    LLMMessage(
+                        role="user",
+                        content="It seems that you have not completed the task.",
+                    )
+                )
             return messages
 
         step.state = AgentStepState.CALLING_TOOL
