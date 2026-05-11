@@ -226,20 +226,34 @@ class BaseAgent(ABC):
 
         Triggered when ``step_number % 10 == 0`` and ``len(messages) > 30``.
         Replaces older assistant/tool-result pairs with a structured summary,
-        preserving the system prompt and the last 15 messages as the working set.
+        preserving the system prompt and the last messages as the working set.
+
+        **Tool-call atomicity:** the tail boundary is adjusted so that a
+        ``tool_result`` is never left orphaned without its preceding
+        ``tool_call``.  This prevents 400 errors from providers (OpenAI,
+        DeepSeek) that validate the tool-call chain.
 
         Returns the (possibly compressed) message list.
         """
         if not (step_number % 10 == 0 and len(messages) > 30):
             return messages
 
-        # Always preserve: system prompt (index 0) + last 15 messages
+        # Always preserve: system prompt (index 0)
         keep_head = 1
-        keep_tail = 15
-        if len(messages) <= keep_head + keep_tail:
+        # Target tail length — adjusted downward to avoid splitting pairs
+        target_tail = 15
+        if len(messages) <= keep_head + target_tail:
             return messages
 
-        compressible = messages[keep_head:-keep_tail]
+        # ── Find a safe cut that respects tool_call/tool_result pairs ──
+        # Walk backward from the tentative cut point to ensure we don't
+        # orphan a tool_result whose corresponding tool_call lies in the
+        # compressible section.
+        tail_start = len(messages) - target_tail
+        while tail_start > keep_head and messages[tail_start].tool_result is not None:
+            tail_start -= 1
+
+        compressible = messages[keep_head:tail_start]
 
         # Build deterministic summary from compressible history
         summary_parts: list[str] = []
@@ -267,13 +281,13 @@ class BaseAgent(ABC):
             LLMMessage(
                 role="user",
                 content=(
-                    f"[Context Summary — steps before #{step_number - keep_tail + 1}]:\n"
+                    f"[Context Summary — steps before #{step_number}]:\n"
                     f"{summary_text}\n\n"
                     "The above is a compressed summary of earlier steps. "
                     "Continue working on the task."
                 ),
             ),
-            *messages[-keep_tail:],
+            *messages[tail_start:],
         ]
         return compressed
 
@@ -356,7 +370,7 @@ class BaseAgent(ABC):
 
     async def initialise_mcp(self) -> None:
         """Initialize MCP tools. Override in subclasses that use MCP."""
-        pass
+        return None
 
     @abstractmethod
     async def cleanup_mcp_clients(self) -> None:
