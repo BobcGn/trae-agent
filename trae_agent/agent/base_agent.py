@@ -217,11 +217,9 @@ class BaseAgent(ABC):
             res = await self._tool_caller.close_tools()
             return res
 
-# ── Context compression ──────────────────────────────────────────────
+    # ── Context compression ──────────────────────────────────────────────
 
-    def _compress_messages(
-        self, messages: list[LLMMessage], step_number: int
-    ) -> list[LLMMessage]:
+    def _compress_messages(self, messages: list[LLMMessage], step_number: int) -> list[LLMMessage]:
         """Compress old conversation history to prevent unbounded context growth.
 
         Triggered when ``step_number % 10 == 0`` and ``len(messages) > 30``.
@@ -271,10 +269,15 @@ class BaseAgent(ABC):
             elif msg.content and len(msg.content) > 20:
                 # Capture key decisions or plans from assistant messages
                 lower = msg.content.lower()
-                if any(kw in lower for kw in ("plan", "approach", "strategy", "fix", "change", "implement")):
+                if any(
+                    kw in lower
+                    for kw in ("plan", "approach", "strategy", "fix", "change", "implement")
+                ):
                     summary_parts.append(f"→ {msg.content[:200]}")
 
-        summary_text = "\n".join(summary_parts) if summary_parts else "(see last messages for context)"
+        summary_text = (
+            "\n".join(summary_parts) if summary_parts else "(see last messages for context)"
+        )
 
         compressed: list[LLMMessage] = [
             messages[0],  # system prompt

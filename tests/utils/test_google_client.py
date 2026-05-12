@@ -43,14 +43,16 @@ class TestGoogleClient(unittest.TestCase):
         self.assertIsNotNone(google_client.client)
 
     @patch("trae_agent.utils.llm_clients.google_client.genai.Client")
-    @patch.dict(os.environ, {"GOOGLE_API_KEY": "test-env-api-key"})
     def test_google_client_init_with_env_key(self, mock_genai_client):
         """
-        Test that the google client initializes using the GOOGLE_API_KEY environment variable.
+        Test that the google client initializes using the api_key from ModelProvider.
+
+        Note: api_key is always read from model_config.model_provider.api_key,
+        not from the GOOGLE_API_KEY environment variable.
         """
         model_config = ModelConfig(
             model=TEST_MODEL,
-            model_provider=ModelProvider(api_key="", provider="google"),
+            model_provider=ModelProvider(api_key="test-provider-api-key", provider="google"),
             max_tokens=1000,
             temperature=0.8,
             top_p=7.0,
@@ -59,8 +61,8 @@ class TestGoogleClient(unittest.TestCase):
             max_retries=1,
         )
         google_client = GoogleClient(model_config)
-        mock_genai_client.assert_called_once_with(api_key="test-env-api-key")
-        self.assertEqual(google_client.api_key, "test-env-api-key")
+        mock_genai_client.assert_called_once_with(api_key="test-provider-api-key")
+        self.assertEqual(google_client.api_key, "test-provider-api-key")
 
     @patch.dict(os.environ, {"GOOGLE_API_KEY": ""})
     def test_google_client_init_no_key_raises_error(self):
@@ -162,8 +164,8 @@ class TestGoogleClient(unittest.TestCase):
         mock_genai_client.return_value.models = mock_model
 
         mock_tool = MagicMock(spec=Tool)
-        mock_tool.name = "get_weather"
-        mock_tool.description = "Gets the weather for a location."
+        mock_tool.get_name.return_value = "get_weather"
+        mock_tool.get_description.return_value = "Gets the weather for a location."
         mock_tool.get_input_schema.return_value = {
             "type": "object",
             "properties": {"location": {"type": "string"}},
@@ -303,10 +305,11 @@ class TestGoogleClient(unittest.TestCase):
             top_k=8,
             parallel_tool_calls=False,
             max_retries=1,
+            supports_tool_calling=True,
         )
         google_client = GoogleClient(model_config)
         self.assertEqual(google_client.supports_tool_calling(model_config), True)
-        model_config.model = "no such model"
+        model_config.supports_tool_calling = False
         self.assertEqual(google_client.supports_tool_calling(model_config), False)
 
 

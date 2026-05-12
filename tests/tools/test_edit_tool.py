@@ -21,6 +21,7 @@ class TestTextEditorTool(unittest.IsolatedAsyncioTestCase):
 
     def tearDown(self):
         import shutil
+
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
     def mock_file_system(self, exists=True, is_dir=False, content=""):

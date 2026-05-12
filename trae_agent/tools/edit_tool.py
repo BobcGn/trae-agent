@@ -209,18 +209,14 @@ Notes for using the `search_replace` command (recommended):
                 original_line += delta
         return max(1, original_line)
 
-    def _adjust_view_range(
-        self, path: str, view_range: list[int]
-    ) -> list[int]:
+    def _adjust_view_range(self, path: str, view_range: list[int]) -> list[int]:
         """Adjust both bounds of a view range for tracked line offsets.
 
         A ``final_line`` of -1 (view to end of file) is preserved unchanged.
         """
         adjusted_start = self._adjust_line_number(path, view_range[0])
         adjusted_end = (
-            view_range[1]
-            if view_range[1] == -1
-            else self._adjust_line_number(path, view_range[1])
+            view_range[1] if view_range[1] == -1 else self._adjust_line_number(path, view_range[1])
         )
         return [adjusted_start, adjusted_end]
 
@@ -348,7 +344,10 @@ Notes for using the `search_replace` command (recommended):
 
         file_content = self.read_file(_path)
         new_content, success, msg, removed, added = fuzzy_match_and_replace(
-            file_content, search_block, replace_block, match_mode  # type: ignore[arg-type]
+            file_content,
+            search_block,
+            replace_block,
+            match_mode,  # type: ignore[arg-type]
         )
 
         if not success:
@@ -412,9 +411,7 @@ Notes for using the `search_replace` command (recommended):
 
         new_str_lines = new_str.split("\n")
         new_file_text_lines = (
-            file_text_lines[:adjusted_line]
-            + new_str_lines
-            + file_text_lines[adjusted_line:]
+            file_text_lines[:adjusted_line] + new_str_lines + file_text_lines[adjusted_line:]
         )
         snippet_lines = (
             file_text_lines[max(0, adjusted_line - SNIPPET_LINES) : adjusted_line]

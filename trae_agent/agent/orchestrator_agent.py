@@ -81,8 +81,7 @@ class OrchestratorAgent(BaseAgent):
             # Build all available tools — per-phase filtering happens at runtime
             provider = self._model_config.model_provider.provider
             self._tools = [
-                tools_registry[name](model_provider=provider)
-                for name in TraeAgentToolNames
+                tools_registry[name](model_provider=provider) for name in TraeAgentToolNames
             ]
 
         self._initial_messages = []

@@ -13,7 +13,9 @@ from trae_agent.utils.config import AgentConfig
 from trae_agent.utils.llm_clients.llm_basics import LLMMessage
 
 
-def make_tool_result(name: str, success: bool, result: str | None = None, error: str | None = None) -> ToolResult:
+def make_tool_result(
+    name: str, success: bool, result: str | None = None, error: str | None = None
+) -> ToolResult:
     return ToolResult(call_id="call_1", name=name, success=success, result=result, error=error)
 
 
@@ -26,9 +28,7 @@ def make_messages(count: int, with_results: bool = True) -> list[LLMMessage]:
                 LLMMessage(role="user", tool_result=make_tool_result("bash", True, f"output_{i}"))
             )
         else:
-            messages.append(
-                LLMMessage(role="assistant", content=f"I will try approach {i}.")
-            )
+            messages.append(LLMMessage(role="assistant", content=f"I will try approach {i}."))
     return messages
 
 
@@ -119,7 +119,9 @@ class TestCompressMessagesWithFailures(unittest.TestCase):
             LLMMessage(role="system", content="system prompt"),
             LLMMessage(
                 role="user",
-                tool_result=make_tool_result("bash", False, error="timeout: command exceeded limit"),
+                tool_result=make_tool_result(
+                    "bash", False, error="timeout: command exceeded limit"
+                ),
             ),
         ]
         for i in range(2, 40):

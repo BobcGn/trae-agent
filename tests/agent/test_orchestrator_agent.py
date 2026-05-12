@@ -173,6 +173,7 @@ class TestOrchestratorFullExecution(unittest.IsolatedAsyncioTestCase):
         # Set up tools
         from trae_agent.tools.edit_tool import TextEditorTool
         from trae_agent.tools.sequential_thinking_tool import SequentialThinkingTool
+
         self.agent._tools = [
             TextEditorTool(),
             SequentialThinkingTool(),
@@ -247,10 +248,12 @@ class TestOrchestratorAgentType(unittest.TestCase):
 
     def test_agent_type_enum_exists(self):
         from trae_agent.agent.agent import AgentType
+
         self.assertIn("OrchestratorAgent", AgentType.__members__)
 
     def test_orchestrator_value(self):
         from trae_agent.agent.agent import AgentType
+
         self.assertEqual(AgentType.OrchestratorAgent.value, "orchestrator_agent")
 
 

@@ -149,7 +149,9 @@ def process_c():
 
     def test_search_block_longer_than_file(self):
         """Search block longer than file should return empty."""
-        results = find_similar_regions("short", "this is a much longer search block", threshold=0.85)
+        results = find_similar_regions(
+            "short", "this is a much longer search block", threshold=0.85
+        )
         self.assertEqual(len(results), 0)
 
 
@@ -254,9 +256,7 @@ class TestFuzzyMatchAndReplace(unittest.TestCase):
         content = "line1\nline2\nline3"
         search = "line2 "
         replace = "modified"
-        result, success, *_ = fuzzy_match_and_replace(
-            content, search, replace, match_mode="auto"
-        )
+        result, success, *_ = fuzzy_match_and_replace(content, search, replace, match_mode="auto")
         self.assertTrue(success)
 
     def test_blank_line_tolerance(self):
@@ -264,9 +264,7 @@ class TestFuzzyMatchAndReplace(unittest.TestCase):
         content = "start\n\n\n\nmiddle\n\n\n\nend"
         search = "start\n\n\n\n\nmiddle"
         replace = "replaced"
-        result, success, *_ = fuzzy_match_and_replace(
-            content, search, replace, match_mode="auto"
-        )
+        result, success, *_ = fuzzy_match_and_replace(content, search, replace, match_mode="auto")
         # After normalization, both collapse to same blank-line count
         self.assertTrue(success)
 
@@ -408,8 +406,10 @@ class TestLineOffsetWithEditTool(unittest.TestCase):
         content = "a\nb\nc\nd\ne"
         file_path = Path(path)
 
-        with unittest.mock.patch.object(tool, "read_file", return_value=content), \
-             unittest.mock.patch.object(tool, "write_file"):
+        with (
+            unittest.mock.patch.object(tool, "read_file", return_value=content),
+            unittest.mock.patch.object(tool, "write_file"),
+        ):
             tool.str_replace(file_path, "b\nc", "x\ny\nz")
 
         entries = tool._line_offset_tracker.get(path, [])
@@ -423,8 +423,10 @@ class TestLineOffsetWithEditTool(unittest.TestCase):
         content = "a\nb\nd\ne"
         file_path = Path(path)
 
-        with unittest.mock.patch.object(tool, "read_file", return_value=content), \
-             unittest.mock.patch.object(tool, "write_file"):
+        with (
+            unittest.mock.patch.object(tool, "read_file", return_value=content),
+            unittest.mock.patch.object(tool, "write_file"),
+        ):
             tool._insert(file_path, 2, "c")
 
         entries = tool._line_offset_tracker.get(path, [])
