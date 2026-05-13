@@ -3,6 +3,7 @@
 
 """OrchestratorAgent — multi-agent orchestration with PLANNING → CODING → REVIEW phases."""
 
+import logging
 import time
 from enum import Enum
 from typing import override
@@ -10,6 +11,8 @@ from typing import override
 from trae_agent.agent.agent_basics import AgentExecution, AgentState, AgentStep, AgentStepState
 from trae_agent.agent.base_agent import BaseAgent
 from trae_agent.agent.trae_agent import TraeAgentToolNames
+from trae_agent.compression.compressor import MicroCompressionStrategy
+from trae_agent.compression.types import CompressionContext
 from trae_agent.prompt.agent_prompt import (
     CODER_SYSTEM_PROMPT,
     PLANNER_SYSTEM_PROMPT,
@@ -19,6 +22,8 @@ from trae_agent.tools import tools_registry
 from trae_agent.tools.base import Tool, ToolExecutor
 from trae_agent.utils.config import AgentConfig
 from trae_agent.utils.llm_clients.llm_basics import LLMMessage, LLMResponse
+
+logger = logging.getLogger(__name__)
 
 
 class OrchestratorPhase(Enum):
@@ -62,6 +67,7 @@ class OrchestratorAgent(BaseAgent):
         docker_keep: bool = True,
     ):
         super().__init__(agent_config, docker_config, docker_keep)
+        self._micro_compressor = MicroCompressionStrategy()
         self._project_path: str = ""
         self._task: str = ""
 
@@ -164,7 +170,33 @@ class OrchestratorAgent(BaseAgent):
         ]
 
         step_number = 1
+        last_compression_step = 0
+        last_assistant_message: str | None = None
+        consecutive_errors = 0
+
         while step_number <= MAX_STEPS_PER_PHASE:
+            # ── Micro-compression check (before every LLM call) ──────
+            ctx = CompressionContext(
+                step_number=step_number,
+                message_count=len(messages),
+                consecutive_errors=consecutive_errors,
+                phase_name=phase.value,
+                last_compression_step=last_compression_step,
+                last_message=last_assistant_message,
+            )
+
+            if self._micro_compressor.should_compress(ctx):
+                messages, report = self._micro_compressor.compress(messages, ctx)
+                logger.info(
+                    "Compression triggered: %s, tokens_saved=%d, strategy=%s, step=%d",
+                    report.trigger.value,
+                    report.tokens_saved,
+                    report.strategy_name,
+                    step_number,
+                )
+                self._reset_llm_client_history()
+                last_compression_step = step_number
+
             step = AgentStep(step_number=step_number, state=AgentStepState(phase.value))
             self._update_cli_console(step, execution)
 
@@ -177,6 +209,9 @@ class OrchestratorAgent(BaseAgent):
 
             step.llm_response = llm_response
             self._update_cli_console(step, execution)
+
+            # Capture last assistant text for next compression check
+            last_assistant_message = llm_response.content or None
 
             # Check for phase completion
             if self._phase_complete(phase, llm_response):
@@ -196,6 +231,10 @@ class OrchestratorAgent(BaseAgent):
                 step.tool_results = tool_results
                 self._update_cli_console(step, execution)
 
+                # Track consecutive errors for forced compression trigger
+                has_error = any(not tr.success for tr in tool_results)
+                consecutive_errors = consecutive_errors + 1 if has_error else 0
+
                 for tr in tool_results:
                     messages.append(LLMMessage(role="user", tool_result=tr))
 
@@ -207,6 +246,7 @@ class OrchestratorAgent(BaseAgent):
                 # LLM thinking without tool calls — capture response and continue
                 if llm_response.content:
                     messages.append(LLMMessage(role="assistant", content=llm_response.content))
+                consecutive_errors = 0
                 step.state = AgentStepState.COMPLETED
                 self._record_handler(step, messages)
                 self._update_cli_console(step, execution)

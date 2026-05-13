@@ -10,6 +10,8 @@ from typing import Union
 
 from trae_agent.agent.agent_basics import AgentExecution, AgentState, AgentStep, AgentStepState
 from trae_agent.agent.docker_manager import DockerManager
+from trae_agent.compression.compressor import MicroCompressionStrategy
+from trae_agent.compression.types import CompressionContext
 from trae_agent.tools import tools_registry
 from trae_agent.tools.base import Tool, ToolExecutor, ToolResult
 from trae_agent.tools.ckg.ckg_database import clear_older_ckg
@@ -80,6 +82,10 @@ class BaseAgent(ABC):
 
         # CKG tool-specific: clear the older CKG databases
         clear_older_ckg()
+
+        # Compression — shared instance prevents per-call instantiation
+        self._micro_compressor = MicroCompressionStrategy()
+        self._last_compression_step = 0
 
     @property
     def llm_client(self) -> LLMClient:
@@ -171,7 +177,6 @@ class BaseAgent(ABC):
                     # Context compression — periodically summarize old history
                     compressed = self._compress_messages(full_messages, step_number)
                     if compressed is not full_messages:
-                        self._reset_llm_client_history()
                         full_messages = compressed
                         messages = compressed
 
@@ -220,78 +225,34 @@ class BaseAgent(ABC):
     # ── Context compression ──────────────────────────────────────────────
 
     def _compress_messages(self, messages: list[LLMMessage], step_number: int) -> list[LLMMessage]:
-        """Compress old conversation history to prevent unbounded context growth.
+        """Delegate to ``MicroCompressionStrategy`` for unified compression.
 
-        Triggered when ``step_number % 10 == 0`` and ``len(messages) > 30``.
-        Replaces older assistant/tool-result pairs with a structured summary,
-        preserving the system prompt and the last messages as the working set.
+        Uses the shared ``self._micro_compressor`` instance and tracks
+        ``self._last_compression_step`` across invocations (方案 B from
+        review F-1) to avoid re-compressing every step.
 
-        **Tool-call atomicity:** the tail boundary is adjusted so that a
-        ``tool_result`` is never left orphaned without its preceding
-        ``tool_call``.  This prevents 400 errors from providers (OpenAI,
-        DeepSeek) that validate the tool-call chain.
-
-        Returns the (possibly compressed) message list.
+        Returns:
+            The (possibly compressed) message list, or the original list
+            unchanged if conditions are not met.
         """
-        if not (step_number % 10 == 0 and len(messages) > 30):
+        if step_number - self._last_compression_step < self._micro_compressor.step_interval:
             return messages
 
-        # Always preserve: system prompt (index 0)
-        keep_head = 1
-        # Target tail length — adjusted downward to avoid splitting pairs
-        target_tail = 15
-        if len(messages) <= keep_head + target_tail:
-            return messages
-
-        # ── Find a safe cut that respects tool_call/tool_result pairs ──
-        # Walk backward from the tentative cut point to ensure we don't
-        # orphan a tool_result whose corresponding tool_call lies in the
-        # compressible section.
-        tail_start = len(messages) - target_tail
-        while tail_start > keep_head and messages[tail_start].tool_result is not None:
-            tail_start -= 1
-
-        compressible = messages[keep_head:tail_start]
-
-        # Build deterministic summary from compressible history
-        summary_parts: list[str] = []
-        for msg in compressible:
-            if msg.tool_result:
-                result = msg.tool_result
-                label = "✓" if result.success else "✗"
-                detail = ""
-                if result.result:
-                    detail = result.result[:120]
-                elif result.error:
-                    detail = result.error[:120]
-                if detail:
-                    summary_parts.append(f"{label} {result.name}: {detail}")
-            elif msg.content and len(msg.content) > 20:
-                # Capture key decisions or plans from assistant messages
-                lower = msg.content.lower()
-                if any(
-                    kw in lower
-                    for kw in ("plan", "approach", "strategy", "fix", "change", "implement")
-                ):
-                    summary_parts.append(f"→ {msg.content[:200]}")
-
-        summary_text = (
-            "\n".join(summary_parts) if summary_parts else "(see last messages for context)"
+        ctx = CompressionContext(
+            step_number=step_number,
+            message_count=len(messages),
+            consecutive_errors=0,
+            phase_name="react",
+            last_compression_step=self._last_compression_step,
+            last_message=None,
         )
 
-        compressed: list[LLMMessage] = [
-            messages[0],  # system prompt
-            LLMMessage(
-                role="user",
-                content=(
-                    f"[Context Summary — steps before #{step_number}]:\n"
-                    f"{summary_text}\n\n"
-                    "The above is a compressed summary of earlier steps. "
-                    "Continue working on the task."
-                ),
-            ),
-            *messages[tail_start:],
-        ]
+        if not self._micro_compressor.should_compress(ctx):
+            return messages
+
+        compressed, _report = self._micro_compressor.compress(messages, ctx)
+        self._reset_llm_client_history()
+        self._last_compression_step = step_number
         return compressed
 
     def _reset_llm_client_history(self) -> None:
