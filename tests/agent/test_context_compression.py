@@ -65,14 +65,21 @@ class TestCompressMessagesThreshold(unittest.TestCase):
         result = self.agent._compress_messages(messages, step_number=5)
         self.assertIs(result, messages)
 
-    def test_no_compression_small_list(self):
-        """Step at boundary but fewer than 30 messages — no compression."""
-        messages = make_messages(20)
-        result = self.agent._compress_messages(messages, step_number=10)
+    def test_no_compression_below_threshold_any_count(self):
+        """Step below interval even with many messages — no compression."""
+        messages = make_messages(100)
+        result = self.agent._compress_messages(messages, step_number=9)
         self.assertIs(result, messages)
 
     def test_compression_at_boundary(self):
-        """Step at boundary AND > 30 messages — compression triggers."""
+        """Step at boundary — compression triggers (count no longer gated)."""
+        messages = make_messages(20)
+        result = self.agent._compress_messages(messages, step_number=10)
+        self.assertIsNot(result, messages)
+        self.assertLess(len(result), len(messages))
+
+    def test_compression_large_list(self):
+        """Large list at boundary — compression triggers."""
         messages = make_messages(40)
         result = self.agent._compress_messages(messages, step_number=10)
         self.assertIsNot(result, messages)
@@ -105,7 +112,7 @@ class TestCompressMessagesPreservation(unittest.TestCase):
         messages = make_messages(40)
         result = self.agent._compress_messages(messages, step_number=10)
         self.assertEqual(result[1].role, "user")
-        self.assertIn("Context Summary", result[1].content or "")
+        self.assertIn("Micro-Compression", result[1].content or "")
 
 
 class TestCompressMessagesWithFailures(unittest.TestCase):

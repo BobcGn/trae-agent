@@ -43,7 +43,7 @@ class TestGoogleClient(unittest.TestCase):
         self.assertIsNotNone(google_client.client)
 
     @patch("trae_agent.utils.llm_clients.google_client.genai.Client")
-    def test_google_client_init_with_env_key(self, mock_genai_client):
+    def test_google_client_init_with_provider_api_key(self, mock_genai_client):
         """
         Test that the google client initializes using the api_key from ModelProvider.
 
