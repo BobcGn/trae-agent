@@ -24,6 +24,7 @@ TraeAgentToolNames = [
     "json_edit_tool",
     "task_done",
     "bash",
+    "resolve_lazy_ref",
 ]
 
 

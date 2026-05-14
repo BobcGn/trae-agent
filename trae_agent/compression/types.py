@@ -81,13 +81,13 @@ class SessionSummary:
 
 
 LazyRef: TypeAlias = str
-"""A placeholder like ``@{lazy:hash}`` that can be rehydrated on demand.
+"""A placeholder like ``[lazy-ref:<hash>]`` that can be rehydrated on demand.
 
 Used by micro-compression to defer large tool outputs (file views, grep
 results) until the model actually references them, keeping the active
-message window lean.
+message window lean.  Call ``resolve_lazy_ref`` with the hash to retrieve
+the full content.
 """
-
 
 
 def find_safe_cut(
