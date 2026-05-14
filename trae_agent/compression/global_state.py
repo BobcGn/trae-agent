@@ -63,20 +63,24 @@ class GlobalStateSchema:
         else:
             lines.append("(no progress yet)")
 
-        lines.extend([
-            "",
-            "## Design Decisions",
-        ])
+        lines.extend(
+            [
+                "",
+                "## Design Decisions",
+            ]
+        )
         if self.design_decisions:
             lines.extend(f"- {_escape_md_lines(d)}" for d in self.design_decisions)
         else:
             lines.append("(no decisions recorded)")
 
-        lines.extend([
-            "",
-            "## Review Verdict",
-            _escape_md_lines(self.review_verdict or "(not yet reviewed)"),
-        ])
+        lines.extend(
+            [
+                "",
+                "## Review Verdict",
+                _escape_md_lines(self.review_verdict or "(not yet reviewed)"),
+            ]
+        )
         return "\n".join(lines)
 
     @classmethod
@@ -106,7 +110,9 @@ class GlobalStateSchema:
             for line in text.splitlines():
                 if line.startswith("## "):
                     # Flush the previous section before switching
-                    _flush_text_section(state, current_section, arch_lines, plan_lines, review_lines)
+                    _flush_text_section(
+                        state, current_section, arch_lines, plan_lines, review_lines
+                    )
                     # Reset accumulators for the new section
                     arch_lines, plan_lines, review_lines = [], [], []
                     current_section = line.removeprefix("## ").strip()
@@ -116,8 +122,12 @@ class GlobalStateSchema:
                     state.project_path = _extract_colon_value(line)
                 else:
                     _accrue_content(
-                        state, current_section, line,
-                        arch_lines, plan_lines, review_lines,
+                        state,
+                        current_section,
+                        line,
+                        arch_lines,
+                        plan_lines,
+                        review_lines,
                     )
 
             # Flush the final section
@@ -149,10 +159,7 @@ def _escape_md_lines(text: str) -> str:
     from being parsed as ``## Section`` boundaries during deserialization,
     while preserving readability.
     """
-    return "\n".join(
-        f"\\{line}" if line.startswith("## ") else line
-        for line in text.splitlines()
-    )
+    return "\n".join(f"\\{line}" if line.startswith("## ") else line for line in text.splitlines())
 
 
 def _flush_text_section(
@@ -215,12 +222,10 @@ class GlobalStateBackend(ABC):
     """
 
     @abstractmethod
-    async def read(self) -> str:
-        ...
+    async def read(self) -> str: ...
 
     @abstractmethod
-    async def write(self, content: str) -> None:
-        ...
+    async def write(self, content: str) -> None: ...
 
 
 class FileBackend(GlobalStateBackend):
@@ -322,8 +327,7 @@ class GlobalStateManager:
         allowed = self._WRITE_PERMISSIONS.get(phase, set())
         if section not in allowed:
             raise PermissionError(
-                f"Phase '{phase}' cannot write to section '{section}'. "
-                f"Allowed: {allowed}"
+                f"Phase '{phase}' cannot write to section '{section}'. Allowed: {allowed}"
             )
 
         if section in ("progress_log", "design_decisions", "snapshot_history"):

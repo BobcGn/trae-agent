@@ -18,6 +18,7 @@ from trae_agent.prompt.agent_prompt import (
     PLANNER_SYSTEM_PROMPT,
     REVIEWER_SYSTEM_PROMPT,
 )
+from trae_agent.prompt.skills_registry import ProjectContext, SkillsRegistry
 from trae_agent.tools import tools_registry
 from trae_agent.tools.base import Tool, ToolExecutor
 from trae_agent.utils.config import AgentConfig
@@ -35,17 +36,19 @@ class OrchestratorPhase(Enum):
 
 
 # Tool permissions per phase (subset of TraeAgentToolNames)
-PHASE_TOOL_NAMES: dict[OrchestratorPhase, list[str]] = {
-    OrchestratorPhase.PLANNING: [
+PHASE_TOOL_NAMES: dict[OrchestratorPhase, set[str]] = {
+    OrchestratorPhase.PLANNING: {
         "str_replace_based_edit_tool",
         "sequentialthinking",
-    ],
-    OrchestratorPhase.CODING: TraeAgentToolNames,
-    OrchestratorPhase.REVIEWING: [
+        "resolve_lazy_ref",
+    },
+    OrchestratorPhase.CODING: set(TraeAgentToolNames),
+    OrchestratorPhase.REVIEWING: {
         "str_replace_based_edit_tool",
         "bash",
         "sequentialthinking",
-    ],
+        "resolve_lazy_ref",
+    },
 }
 
 # Max steps per phase (inner loop bound)
@@ -68,6 +71,8 @@ class OrchestratorAgent(BaseAgent):
     ):
         super().__init__(agent_config, docker_config, docker_keep)
         self._micro_compressor = MicroCompressionStrategy()
+        self._skills_registry = SkillsRegistry()
+        self._project_context: ProjectContext | None = None
         self._project_path: str = ""
         self._task: str = ""
 
@@ -97,6 +102,7 @@ class OrchestratorAgent(BaseAgent):
         if extra_args:
             if "project_path" in extra_args:
                 self._project_path = extra_args["project_path"]
+                self._project_context = self._skills_registry.detect(self._project_path)
                 user_message += f"[Project root path]:\n{self._project_path}\n\n"
             if "issue" in extra_args:
                 user_message += (
@@ -173,6 +179,7 @@ class OrchestratorAgent(BaseAgent):
         last_compression_step = 0
         last_assistant_message: str | None = None
         consecutive_errors = 0
+        pre_phase_step_count = len(execution.steps)  # C4: track step offset for reviewer bash check
 
         while step_number <= MAX_STEPS_PER_PHASE:
             # ── Micro-compression check (before every LLM call) ──────
@@ -215,6 +222,19 @@ class OrchestratorAgent(BaseAgent):
 
             # Check for phase completion
             if self._phase_complete(phase, llm_response):
+                # C4: Reviewer must have run bash before verdict
+                if phase == OrchestratorPhase.REVIEWING and not self._reviewer_executed_bash(
+                    execution, pre_phase_step_count
+                ):
+                    reminder = (
+                        "You have not executed any CI commands. Before providing your verdict, "
+                        "you MUST call `bash` to run the test suite, lint, and type checks. "
+                        "Execute them now."
+                    )
+                    messages.append(LLMMessage(role="user", content=reminder))
+                    consecutive_errors = 0
+                    step_number += 1
+                    continue
                 self._record_handler(step, messages)
                 self._update_cli_console(step, execution)
                 execution.steps.append(step)
@@ -259,20 +279,40 @@ class OrchestratorAgent(BaseAgent):
 
     # ── Phase detection ───────────────────────────────────────────────
 
+    @staticmethod
+    def _reviewer_executed_bash(execution: AgentExecution, pre_phase_step_count: int) -> bool:
+        """Check whether the reviewer actually called ``bash`` during the current phase.
+
+        Returns ``False`` if the reviewer tries to emit a verdict without having
+        executed any CI commands — used to enforce the C4 "steel discipline" rule.
+        """
+        reviewing_steps = execution.steps[pre_phase_step_count:]
+        for step in reviewing_steps:
+            if step.tool_calls and any(tc.name == "bash" for tc in step.tool_calls):
+                return True
+        return False
+
     def _phase_complete(self, phase: OrchestratorPhase, response: LLMResponse) -> bool:
         """Check whether the current phase has signalled completion."""
         content = (response.content or "").lower()
 
         match phase:
             case OrchestratorPhase.PLANNING:
-                return "plan completed" in content
+                return (
+                    "plan completed" in content
+                    and "</plan_details>" in content
+                    and "</plan_approach>" in content
+                )
             case OrchestratorPhase.CODING:
                 if response.tool_calls:
                     return any(tc.name == "task_done" for tc in response.tool_calls)
                 return False
             case OrchestratorPhase.REVIEWING:
                 return (
-                    "**pass**" in content or "**fail**" in content or "## review verdict" in content
+                    "**pass**" in content
+                    or "**fail**" in content
+                    or "## review verdict" in content
+                    or "<review_verdict>" in content
                 )
 
     # ── Context builders (phase handoff) ──────────────────────────────
@@ -285,22 +325,32 @@ class OrchestratorAgent(BaseAgent):
         if self._project_path:
             parts.append(f"\n## Project Root\n{self._project_path}")
 
+        arch = self._skills_registry.build_architecture_prompt(self._project_context)
+        if arch:
+            parts.append(f"\n{arch}")
+
         return "\n".join(parts)
 
     def _build_coding_context(self, plan: str) -> str:
         """Build the handoff context for the Coding phase."""
+        arch = self._skills_registry.build_architecture_prompt(self._project_context)
+        arch_section = f"\n{arch}\n" if arch else ""
         return (
             f"## Task\n{self._task}\n\n"
             f"## Plan from Planner\n{plan}\n\n"
+            f"{arch_section}"
             "Please implement the plan above. Execute the steps methodically, "
             "write tests, and verify the fix. Call `task_done` when finished."
         )
 
     def _build_review_context(self, code_result: str) -> str:
         """Build the handoff context for the Review phase."""
+        arch = self._skills_registry.build_architecture_prompt(self._project_context)
+        arch_section = f"\n{arch}\n" if arch else ""
         return (
             f"## Task\n{self._task}\n\n"
             f"## Changes Made\n{code_result}\n\n"
+            f"{arch_section}"
             "Please review the changes above. Check for correctness, regressions, "
             "edge cases, and code quality. Provide a clear verdict."
         )

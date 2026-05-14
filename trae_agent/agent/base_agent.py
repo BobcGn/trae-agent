@@ -166,6 +166,7 @@ class BaseAgent(ABC):
             messages = self._initial_messages
             full_messages = list(messages)
             step_number = 1
+            consecutive_errors = 0
             execution.agent_state = AgentState.RUNNING
 
             while step_number <= self._max_steps:
@@ -174,8 +175,17 @@ class BaseAgent(ABC):
                     messages = await self._run_llm_step(step, messages, execution)
                     full_messages.extend(messages)
 
+                    # Track consecutive tool errors for forced compression trigger
+                    if step.tool_results is not None:
+                        has_error = any(
+                            not tr.success for tr in step.tool_results if tr is not None
+                        )
+                        consecutive_errors = consecutive_errors + 1 if has_error else 0
+
                     # Context compression — periodically summarize old history
-                    compressed = self._compress_messages(full_messages, step_number)
+                    compressed = self._compress_messages(
+                        full_messages, step_number, consecutive_errors
+                    )
                     if compressed is not full_messages:
                         full_messages = compressed
                         messages = compressed
@@ -224,12 +234,18 @@ class BaseAgent(ABC):
 
     # ── Context compression ──────────────────────────────────────────────
 
-    def _compress_messages(self, messages: list[LLMMessage], step_number: int) -> list[LLMMessage]:
+    def _compress_messages(
+        self, messages: list[LLMMessage], step_number: int, consecutive_errors: int = 0
+    ) -> list[LLMMessage]:
         """Delegate to ``MicroCompressionStrategy`` for unified compression.
 
         Uses the shared ``self._micro_compressor`` instance and tracks
         ``self._last_compression_step`` across invocations (方案 B from
         review F-1) to avoid re-compressing every step.
+
+        Args:
+            consecutive_errors: Number of consecutive tool execution failures
+                since the last success. Used by the forced compression trigger.
 
         Returns:
             The (possibly compressed) message list, or the original list
@@ -241,7 +257,7 @@ class BaseAgent(ABC):
         ctx = CompressionContext(
             step_number=step_number,
             message_count=len(messages),
-            consecutive_errors=0,
+            consecutive_errors=consecutive_errors,
             phase_name="react",
             last_compression_step=self._last_compression_step,
             last_message=None,

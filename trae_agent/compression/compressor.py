@@ -14,7 +14,7 @@ The orchestrator owns the lifecycle: it checks micro-compression after
 every ReAct step and triggers session-compression at phase boundaries.
 """
 
-import hashlib
+import re
 from abc import ABC, abstractmethod
 from typing import override
 
@@ -26,6 +26,7 @@ from trae_agent.compression.types import (
     SessionSummary,
     find_safe_cut,
 )
+from trae_agent.tools.resolve_lazy_ref_tool import register_lazy_ref
 from trae_agent.utils.llm_clients.llm_basics import LLMMessage
 
 # ── Interface ──────────────────────────────────────────────────────────────
@@ -168,42 +169,37 @@ class MicroCompressionStrategy(ContextCompressor):
 
         for msg in compressible:
             if msg.tool_result:
-                # TODO: Filter sensitive data (e.g., API keys, tokens, passwords)
-                # from bash tool outputs before summarization.  Add a pluggable
-                # scrubber hook so downstream deployments can supply their own
-                # redaction rules.
                 tr = msg.tool_result
                 label = "✓" if tr.success else "✗"
                 detail = ""
                 if tr.result:
                     if len(tr.result) > self.LARGE_OUTPUT_THRESHOLD:
-                        ref = _content_hash(tr.result)
+                        ref = register_lazy_ref(tr.result)
                         lazy_refs.append(ref)
-                        # TODO: Add a ``resolve_lazy_ref`` Tool so the model can
-                        # re-fetch the full content on demand.  Until then, also
-                        # inject a brief explanation into the system prompt about
-                        # the lazy-ref format and its semantics.
-                        detail = f"[lazy-ref:{ref[:12]}] {tr.result[:80]}..."
+                        detail = f"[lazy-ref:{ref[:12]}] {_scrub_sensitive_data(tr.result)[:80]}..."
                     else:
-                        detail = tr.result[:120]
+                        detail = _scrub_sensitive_data(tr.result)[:120]
                 elif tr.error:
-                    detail = tr.error[:120]
+                    detail = _scrub_sensitive_data(tr.error)[:120]
                 if detail:
                     summary_parts.append(f"{label} {tr.name}: {detail}")
             elif msg.content and len(msg.content) > 20:
                 lower = msg.content.lower()
-                if any(kw in lower for kw in ("plan", "approach", "strategy", "fix", "change", "implement")):
+                if any(
+                    kw in lower
+                    for kw in ("plan", "approach", "strategy", "fix", "change", "implement")
+                ):
                     summary_parts.append(f"→ {msg.content[:200]}")
 
         summary_text = (
-            "\n".join(summary_parts)
-            if summary_parts
-            else "(see last messages for context)"
+            "\n".join(summary_parts) if summary_parts else "(see last messages for context)"
         )
 
         # 3. Attach lazy-load references as a footnote
         if lazy_refs:
-            ref_lines = "\n".join(f"  - {ref[:24]}...  ({len(ref)} bytes hashed)" for ref in lazy_refs)
+            ref_lines = "\n".join(
+                f"  - {ref[:24]}...  ({len(ref)} bytes hashed)" for ref in lazy_refs
+            )
             summary_text += f"\n\n**Lazy-loaded references (re-fetch on demand):**\n{ref_lines}"
 
         compressed: list[LLMMessage] = [
@@ -275,7 +271,11 @@ class SessionCompressionStrategy(ContextCompressor):
 
         # The new root = [system prompt, user message with summary]
         # Preserve the system prompt from the original list
-        system_prompt = messages[0] if messages and messages[0].role == "system" else LLMMessage(role="system", content="")
+        system_prompt = (
+            messages[0]
+            if messages and messages[0].role == "system"
+            else LLMMessage(role="system", content="")
+        )
 
         compressed: list[LLMMessage] = [
             system_prompt,
@@ -315,12 +315,12 @@ class SessionCompressionStrategy(ContextCompressor):
                     # Heuristic: long successful outputs suggest real work
                     if len(tr.result) > 80:
                         summary.key_achievements.append(
-                            f"{tr.name}: {tr.result[:150]}"
+                            f"{tr.name}: {_scrub_sensitive_data(tr.result)[:150]}"
                         )
                 elif not tr.success and tr.error:
                     # Failed tools may indicate trial paths
                     summary.trial_paths.append(
-                        f"{tr.name} error: {tr.error[:150]}"
+                        f"{tr.name} error: {_scrub_sensitive_data(tr.error)[:150]}"
                     )
             elif msg.content:
                 lower = msg.content.lower()
@@ -356,16 +356,9 @@ class SessionCompressionStrategy(ContextCompressor):
 # ── Helpers ────────────────────────────────────────────────────────────────
 
 
-def _content_hash(content: str) -> str:
-    return hashlib.sha256(content.encode("utf-8")).hexdigest()
-
-
 def _estimate_tokens_saved(messages: list[LLMMessage]) -> int:
     """Rough heuristic: 1 token ≈ 4 characters."""
-    total_chars = sum(
-        len(msg.content or "") + len(str(msg.tool_result or ""))
-        for msg in messages
-    )
+    total_chars = sum(len(msg.content or "") + len(str(msg.tool_result or "")) for msg in messages)
     return total_chars // 4
 
 
@@ -379,3 +372,33 @@ def _deduplicate(items: list[str]) -> list[str]:
             seen.add(key)
             result.append(item)
     return result
+
+
+# ── Sensitive data scrubber ──────────────────────────────────────────────────
+
+# TODO: Replace these hardcoded patterns with a pluggable scrubber registry
+# so downstream deployments can supply their own redaction rules (e.g. via
+# env-var-based allow/deny lists, configurable regex sets, or remote
+# detection services).
+
+_SECRET_PATTERNS: list[re.Pattern[str]] = [
+    # OpenAI / Anthropic API keys
+    re.compile(r"sk-[A-Za-z0-9]{20,}"),
+    # Bearer tokens (JWT, opaque tokens)
+    re.compile(r"Bearer [A-Za-z0-9\-\._~+/]+"),
+    # GitHub / GitLab personal access tokens
+    re.compile(r"(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9_]{36,}"),
+    # Generic "secret" / "password" / "token" assignment in code context
+    re.compile(r'(?i)(?:secret|password|token|api_key|apikey)\s*[:=]\s*["\']?\S{16,}'),
+]
+
+
+def _scrub_sensitive_data(text: str) -> str:
+    """Redact common secret patterns from tool output before summarization.
+
+    Operates on the truncated summary text only — the full original content
+    remains available via lazy-ref re-fetch if needed.
+    """
+    for pattern in _SECRET_PATTERNS:
+        text = pattern.sub("[REDACTED_SECRET]", text)
+    return text
