@@ -63,7 +63,10 @@ class TestOrchestratorPhaseDetection(unittest.TestCase):
             return agent
 
     def test_planning_detects_completion(self):
-        response = LLMResponse(content="Plan completed.", usage=None)
+        response = LLMResponse(
+            content="Plan completed.\n</plan_details>\n</plan_approach>",
+            usage=None,
+        )
         self.assertTrue(self.agent._phase_complete(OrchestratorPhase.PLANNING, response))
 
     def test_planning_not_complete(self):
@@ -191,17 +194,18 @@ class TestOrchestratorFullExecution(unittest.IsolatedAsyncioTestCase):
 
     async def test_phase_sequence_three_phases(self):
         """Verify execute_task runs all 3 phases."""
-        # Phase responses:
-        # Planning → "Plan completed."
-        # Coding → "Done." with task_done tool call
-        # Reviewing → "## Review Verdict\n**Pass**"
         self.mock_chat.side_effect = [
-            LLMResponse(content="Plan completed.", usage=None),  # Planning LLM
+            LLMResponse(content="Plan completed.\n</plan_details>\n</plan_approach>", usage=None),  # Planning
             LLMResponse(
                 content="Done.",
                 tool_calls=[ToolCall(name="task_done", call_id="call_1")],
-            ),  # Coding LLM
-            LLMResponse(content="## Review Verdict\n**Pass**", usage=None),  # Review LLM
+            ),  # Coding
+            # Reviewing: must call bash before verdict (C4 enforcement)
+            LLMResponse(
+                content="Running tests...",
+                tool_calls=[ToolCall(name="bash", call_id="call_bash")],
+            ),
+            LLMResponse(content="## Review Verdict\n**Pass**", usage=None),
         ]
 
         execution = await self.agent.execute_task()
@@ -211,16 +215,21 @@ class TestOrchestratorFullExecution(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Plan", execution.final_result)
         self.assertIn("Result", execution.final_result)
         self.assertIn("Review", execution.final_result)
-        # Should have at least 3 steps (one per phase)
-        self.assertGreaterEqual(len(execution.steps), 3)
+        # Should have at least 4 steps (one per phase + bash call)
+        self.assertGreaterEqual(len(execution.steps), 4)
 
     async def test_all_steps_have_phase_states(self):
         """Each step should have the correct phase state value."""
         self.mock_chat.side_effect = [
-            LLMResponse(content="Plan completed.", usage=None),
+            LLMResponse(content="Plan completed.\n</plan_details>\n</plan_approach>", usage=None),
             LLMResponse(
                 content="Done.",
                 tool_calls=[ToolCall(name="task_done", call_id="call_1")],
+            ),
+            # Reviewing: must call bash before verdict (C4 enforcement)
+            LLMResponse(
+                content="Checking lint...",
+                tool_calls=[ToolCall(name="bash", call_id="call_bash")],
             ),
             LLMResponse(content="## Review Verdict\n**Pass**", usage=None),
         ]
